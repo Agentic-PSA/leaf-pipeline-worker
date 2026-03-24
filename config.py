@@ -7,7 +7,7 @@ class Settings(BaseSettings):
     supabase_service_role_key: str
 
     # Legal DB
-    legal_db_base: str = "https://legal-documents-database.agentic.pl"
+    legal_db_base: str = "http://host.docker.internal:3000"
     legal_db_api_key: str
 
     # LLM (Google Gemini API - direct)
