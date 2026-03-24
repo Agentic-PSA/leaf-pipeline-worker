@@ -15,7 +15,6 @@ class Settings(BaseSettings):
 
     # Legal DB
     legal_db_base: str = "http://host.docker.internal:3000"
-    legal_db_api_key: str
 
     # LLM (Google Gemini API - direct)
     gemini_api_key: str

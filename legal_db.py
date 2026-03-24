@@ -13,12 +13,10 @@ from config import Settings
 class LegalDBClient:
     def __init__(self, settings: Settings, client: httpx.AsyncClient):
         self.base = settings.legal_db_base.rstrip("/")
-        self.api_key = settings.legal_db_api_key
         self.client = client
 
     def _headers(self, extra: dict[str, str] | None = None) -> dict[str, str]:
         h = {
-            "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
             "Accept": "application/json",
         }
