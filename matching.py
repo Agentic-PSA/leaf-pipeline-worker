@@ -99,7 +99,8 @@ def parse_article_reference(text: str) -> dict[str, str] | None:
             rest, re.I,
         )
         if m:
-            val = f"§ {re.sub(r'\\s*[-–—]\\s*§?\\s*', '-', m.group(1).strip())}"
+            _cleaned = re.sub(r'\s*[-–—]\s*§?\s*', '-', m.group(1).strip())
+            val = f"§ {_cleaned}"
             if m.group(2):
                 val += " " + re.sub(r"\s+", " ", m.group(2).strip())
             number_parts.append(val)
