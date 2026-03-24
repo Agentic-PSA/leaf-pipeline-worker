@@ -42,7 +42,6 @@ def parse_article_reference(text: str) -> dict[str, str] | None:
     t = re.sub(r"\)\s*", " ", t)
     t = re.sub(r"\s+", " ", t).strip()
 
-    # Handle "ActName art. N" prefix format
     prefix_m = re.match(r"^(.+?)\s+art\.?\s+(\d+.*)$", t, re.I)
     if prefix_m and not re.match(r"^art\.?$", prefix_m.group(1), re.I):
         act_prefix = prefix_m.group(1).strip()
@@ -52,7 +51,6 @@ def parse_article_reference(text: str) -> dict[str, str] | None:
             art_part = re.sub(rf"\s+{escaped}\s*$", "", art_part, flags=re.I).strip()
             t = f"art. {art_part} {act_prefix}"
 
-    # Split compound "i art."
     i_art = re.search(r"\s+i\s+art\.?\s+\d", t, re.I)
     if i_art:
         first_part = t[: i_art.start()].strip()
@@ -298,9 +296,7 @@ async def match_judgment_refs(
     db: LegalDBClient,
     leaf_ids: list[int],
     alias_map: dict[str, int],
-    supabase_headers: dict[str, str],
-    supabase_url: str,
-    http: httpx.AsyncClient,
+    api: Any,  # PipelineAPIClient
 ) -> dict[str, int]:
     """Match unmatched article refs for given leaf IDs."""
     if not leaf_ids:
@@ -356,15 +352,12 @@ async def match_judgment_refs(
             if act:
                 act_id = act["id"]
                 alias_map[alias_lower] = act_id
-                # Save to alias map via Supabase REST
-                try:
-                    await http.post(
-                        f"{supabase_url}/rest/v1/article_alias_map",
-                        headers=supabase_headers,
-                        json={"alias": parsed["actAlias"], "act_id": act_id, "act_title": act.get("short_title") or act.get("title")},
-                    )
-                except Exception:
-                    pass
+                # Save new alias via API (no direct Supabase access)
+                await api.save_alias(
+                    parsed["actAlias"],
+                    act_id,
+                    act.get("short_title") or act.get("title"),
+                )
 
         if not act_id:
             unmatched += 1

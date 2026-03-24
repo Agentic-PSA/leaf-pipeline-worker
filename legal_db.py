@@ -52,16 +52,22 @@ class LegalDBClient:
         return json.loads(text) if text else None
 
     async def insert_leafs(self, leafs: list[dict]) -> Any:
+        """Insert leaf records (no upsert — unique constraint removed)."""
         r = await self.client.post(
-            f"{self.base}/orzeczenie_leaf?on_conflict=orzeczenie_id,typ",
-            headers=self._headers(
-                {"Prefer": "return=representation,resolution=ignore-duplicates"}
-            ),
+            f"{self.base}/orzeczenie_leaf",
+            headers=self._headers({"Prefer": "return=representation"}),
             content=json.dumps(leafs),
         )
         r.raise_for_status()
         text = r.text.strip()
         return json.loads(text) if text else None
+
+    async def delete_leafs_for_judgment(self, orz_id: int) -> None:
+        """Delete all existing leafs (and their article rels) for a judgment."""
+        leafs = await self.get(f"/orzeczenie_leaf?orzeczenie_id=eq.{orz_id}&select=id")
+        for lf in leafs:
+            await self.delete("leaf_artykul_rel", f"leaf_id=eq.{lf['id']}")
+        await self.delete("orzeczenie_leaf", f"orzeczenie_id=eq.{orz_id}")
 
     async def update(self, table: str, filter_: str, data: dict) -> Any:
         r = await self.client.patch(

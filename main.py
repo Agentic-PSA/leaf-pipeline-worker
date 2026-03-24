@@ -16,17 +16,13 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import json
 import signal
 import sys
 import time
-from datetime import datetime, timezone
 from typing import Any
 
 import httpx
 from rich.console import Console
-from rich.live import Live
-from rich.table import Table
 
 from config import Settings
 from legal_db import LegalDBClient
@@ -39,6 +35,7 @@ from llm import (
     generate_leafs,
 )
 from matching import match_judgment_refs
+from pipeline_api import PipelineAPIClient
 
 console = Console()
 
@@ -57,69 +54,19 @@ signal.signal(signal.SIGINT, _handle_signal)
 signal.signal(signal.SIGTERM, _handle_signal)
 
 
-# ── Supabase REST helpers ─────────────────────────────────────────
+# ── Prompts conversion ───────────────────────────────────────────
 
 
-def sb_headers(settings: Settings) -> dict[str, str]:
-    return {
-        "apikey": settings.supabase_service_role_key,
-        "Authorization": f"Bearer {settings.supabase_service_role_key}",
-        "Content-Type": "application/json",
-        "Prefer": "return=representation",
-    }
-
-
-async def load_prompts(http: httpx.AsyncClient, settings: Settings) -> Prompts:
-    url = f"{settings.supabase_url}/rest/v1/leaf_prompts?leaf_type=in.(case,law,solution)&select=leaf_type,system_prompt,user_prompt,model"
-    r = await http.get(url, headers=sb_headers(settings))
-    prompts = Prompts(model=settings.llm_model)
-    if r.is_success:
-        for row in r.json():
-            lt = row["leaf_type"]
-            if row.get("system_prompt"):
-                setattr(prompts, f"{lt}_system", row["system_prompt"])
-            if row.get("user_prompt"):
-                setattr(prompts, f"{lt}_user", row["user_prompt"])
-            if row.get("model"):
-                    # Direct Gemini API uses model names without provider prefix
-                    prompts.model = row["model"]
-        console.print(f"[green]✓ Loaded prompts from DB, model: {prompts.model}[/]")
-    else:
-        console.print("[yellow]⚠ Using fallback prompts[/]")
-    return prompts
-
-
-async def load_alias_map(http: httpx.AsyncClient, settings: Settings) -> dict[str, int]:
-    url = f"{settings.supabase_url}/rest/v1/article_alias_map?select=alias_lower,act_id&limit=10000"
-    r = await http.get(url, headers=sb_headers(settings))
-    if r.is_success:
-        return {row["alias_lower"]: row["act_id"] for row in r.json() if row.get("alias_lower")}
-    return {}
-
-
-async def update_job(http: httpx.AsyncClient, settings: Settings, job_id: str, updates: dict):
-    updates["updated_at"] = datetime.now(timezone.utc).isoformat()
-    url = f"{settings.supabase_url}/rest/v1/leaf_pipeline_jobs?id=eq.{job_id}"
-    await http.patch(url, headers=sb_headers(settings), json=updates)
-
-
-async def read_job_status(http: httpx.AsyncClient, settings: Settings, job_id: str) -> str | None:
-    """Read current job status from DB — allows UI to signal pause/resume."""
-    url = f"{settings.supabase_url}/rest/v1/leaf_pipeline_jobs?id=eq.{job_id}&select=status"
-    r = await http.get(url, headers=sb_headers(settings))
-    if r.is_success and r.json():
-        return r.json()[0].get("status")
-    return None
-
-
-async def append_job_error(http: httpx.AsyncClient, settings: Settings, job_id: str, error: dict):
-    url = f"{settings.supabase_url}/rest/v1/leaf_pipeline_jobs?id=eq.{job_id}&select=error_log"
-    r = await http.get(url, headers=sb_headers(settings))
-    log = []
-    if r.is_success and r.json():
-        log = r.json()[0].get("error_log") or []
-    log.append({**error, "timestamp": datetime.now(timezone.utc).isoformat()})
-    await update_job(http, settings, job_id, {"error_log": log, "error_count": len(log)})
+def prompts_from_api(data: dict) -> Prompts:
+    """Convert API prompts response to internal Prompts dataclass."""
+    p = Prompts()
+    for typ in ("case", "law", "solution"):
+        if typ in data:
+            setattr(p, f"{typ}_system", data[typ].get("system", getattr(p, f"{typ}_system")))
+            setattr(p, f"{typ}_user", data[typ].get("user", getattr(p, f"{typ}_user")))
+    if data.get("model"):
+        p.model = data["model"]
+    return p
 
 
 # ── Single judgment processor ─────────────────────────────────────
@@ -132,6 +79,7 @@ async def process_one(
     settings: Settings,
     prompts: Prompts,
     alias_map: dict[str, int],
+    api: PipelineAPIClient,
     worker_idx: int,
 ) -> dict[str, Any]:
     bos = int(judgment["numer_bos"])
@@ -157,24 +105,25 @@ async def process_one(
             for typ in ("case", "solution"):
                 valid = [t.strip() for t in getattr(leafs, typ) if len(t.strip()) > 10]
                 if valid and typ not in existing_types:
-                    rows.append({
-                        "orzeczenie_id": judgment["id"],
-                        "typ": typ,
-                        "tresc": "\n\n".join(valid),
-                        "status": "generated",
-                        "llm_model": prompts.model,
-                    })
+                    for leaf_text in valid:
+                        rows.append({
+                            "orzeczenie_id": judgment["id"],
+                            "typ": typ,
+                            "tresc": leaf_text,
+                            "status": "generated",
+                            "llm_model": prompts.model,
+                        })
 
             valid_law = [l for l in leafs.law if len(l.tresc.strip()) > 10]
             if valid_law and "law" not in existing_types:
-                rows.append({
-                    "orzeczenie_id": judgment["id"],
-                    "typ": "law",
-                    "tresc": "\n\n".join(l.tresc.strip() for l in valid_law),
-                    "status": "generated",
-                    "llm_model": prompts.model,
-                })
                 for l in valid_law:
+                    rows.append({
+                        "orzeczenie_id": judgment["id"],
+                        "typ": "law",
+                        "tresc": l.tresc.strip(),
+                        "status": "generated",
+                        "llm_model": prompts.model,
+                    })
                     all_law_p.extend(l.przepisy)
 
             if rows:
@@ -182,14 +131,14 @@ async def process_one(
                 existing = await db.get_leafs_by_judgment(judgment["id"])
                 existing_ids = [l["id"] for l in existing if l.get("id")]
 
-            # Insert article relations
-            law_leaf = next((l for l in existing if l["typ"] == "law"), None)
-            if law_leaf and all_law_p:
-                ex_rels = await db.get_leaf_article_rels(law_leaf["id"])
+            law_leafs = [l for l in existing if l["typ"] == "law"]
+            if law_leafs and all_law_p:
+                first_law = law_leafs[0]
+                ex_rels = await db.get_leaf_article_rels(first_law["id"])
                 if not ex_rels:
                     rels = [
                         {
-                            "leaf_id": law_leaf["id"],
+                            "leaf_id": first_law["id"],
                             "artykul_text_fallback": p["oznaczenie"],
                             "match_status": "unmatched",
                             "scoring": min(10, max(0, round(p["scoring"]))),
@@ -232,10 +181,7 @@ async def process_one(
 
         # Match
         match_start = time.monotonic()
-        match_r = await match_judgment_refs(
-            db, existing_ids, alias_map,
-            sb_headers(settings), settings.supabase_url, http,
-        )
+        match_r = await match_judgment_refs(db, existing_ids, alias_map, api)
         match_ms = int((time.monotonic() - match_start) * 1000)
 
         total_ms = int((time.monotonic() - start) * 1000)
@@ -262,18 +208,23 @@ async def run_pipeline(settings: Settings, job_id: str | None, from_bos: int | N
 
     async with httpx.AsyncClient(timeout=120, http2=True) as http:
         db = LegalDBClient(settings, http)
-        prompts = await load_prompts(http, settings)
-        alias_map = await load_alias_map(http, settings)
-        console.print(f"[green]✓ Loaded {len(alias_map)} aliases[/]")
+        api = PipelineAPIClient(settings.pipeline_api_url, settings.pipeline_api_key, http)
+
+        # Load prompts via API
+        prompts_data = await api.get_prompts()
+        prompts = prompts_from_api(prompts_data)
+        console.print(f"[green]✓ Loaded prompts via API, model: {prompts.model}[/]")
+
+        # Load alias map via API
+        alias_map = await api.get_aliases()
+        console.print(f"[green]✓ Loaded {len(alias_map)} aliases via API[/]")
 
         # Create or load job
         if job_id:
-            url = f"{settings.supabase_url}/rest/v1/leaf_pipeline_jobs?id=eq.{job_id}&select=*"
-            r = await http.get(url, headers=sb_headers(settings))
-            if not r.is_success or not r.json():
+            job = await api.get_job(job_id)
+            if not job:
                 console.print(f"[red]Job {job_id} not found[/]")
                 return
-            job = r.json()[0]
             console.print(f"[cyan]Resuming job {job_id[:8]}… BOS {job['numer_bos_from']}–{job['numer_bos_to']}[/]")
         elif from_bos is not None and to_bos is not None:
             if force:
@@ -291,29 +242,13 @@ async def run_pipeline(settings: Settings, job_id: str | None, from_bos: int | N
                             await db.delete("leaf_artykul_rel", f"leaf_id=eq.{lf['id']}")
                         await db.delete("orzeczenie_leaf", f"orzeczenie_id=eq.{o['id']}")
 
-            total = await db.count_judgments_in_range(from_bos, to_bos)
-            console.print(f"[cyan]Creating job: BOS {from_bos}–{to_bos}, {total} judgments[/]")
-
-            url = f"{settings.supabase_url}/rest/v1/leaf_pipeline_jobs"
-            r = await http.post(
-                url,
-                headers=sb_headers(settings),
-                json={
-                    "numer_bos_from": from_bos,
-                    "numer_bos_to": to_bos,
-                    "total_count": total,
-                    "current_numer_bos": from_bos,
-                    "status": "pending",
-                    "phase": "generate",
-                    "source": "python_worker",
-                },
-            )
-            if not r.is_success:
-                console.print(f"[red]Failed to create job: {r.text}[/]")
+            result = await api.create_job(from_bos, to_bos, force)
+            job = result.get("job")
+            if not job:
+                console.print(f"[red]Failed to create job: {result}[/]")
                 return
-            job = r.json()[0]
             job_id = job["id"]
-            console.print(f"[green]✓ Job created: {job_id[:8]}[/]")
+            console.print(f"[green]✓ Job created via API: {job_id[:8]}[/]")
         else:
             console.print("[red]Specify --job-id or --from/--to[/]")
             return
@@ -325,16 +260,16 @@ async def run_pipeline(settings: Settings, job_id: str | None, from_bos: int | N
         session_start = time.monotonic()
         workers = settings.workers
 
-        await update_job(http, settings, job_id, {"status": "running", "phase": "generate"})
+        await api.update_progress(job_id, {"status": "running", "phase": "generate"})
 
         while not _stop:
             # Check if UI signaled pause
-            db_status = await read_job_status(http, settings, job_id)
+            db_status = await api.read_job_status(job_id)
             if db_status == "paused":
                 console.print("[yellow]⏸ Job paused via UI — waiting for resume signal…[/]")
                 while not _stop:
                     await asyncio.sleep(5)
-                    db_status = await read_job_status(http, settings, job_id)
+                    db_status = await api.read_job_status(job_id)
                     if db_status != "paused":
                         console.print(f"[green]▶ Job resumed (status: {db_status})[/]")
                         break
@@ -347,7 +282,7 @@ async def run_pipeline(settings: Settings, job_id: str | None, from_bos: int | N
             )
 
             if not judgments:
-                await update_job(http, settings, job_id, {"status": "completed", "phase": "done"})
+                await api.update_progress(job_id, {"status": "completed", "phase": "done"})
                 console.print("[green]✅ Job completed — no more judgments[/]")
                 break
 
@@ -357,7 +292,7 @@ async def run_pipeline(settings: Settings, job_id: str | None, from_bos: int | N
             # Staggered parallel execution
             async def _run(j, idx):
                 await asyncio.sleep(idx * settings.stagger_ms / 1000)
-                return await process_one(db, http, j, settings, prompts, alias_map, idx)
+                return await process_one(db, http, j, settings, prompts, alias_map, api, idx)
 
             tasks = [_run(j, i) for i, j in enumerate(batch)]
             results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -391,7 +326,7 @@ async def run_pipeline(settings: Settings, job_id: str | None, from_bos: int | N
                     else:
                         session_errors += 1
                     console.print(f"  [red]✗[/] BOS={r['numer_bos']}: {err}")
-                    await append_job_error(http, settings, job_id, {"numer_bos": r["numer_bos"], "message": err})
+                    await api.append_error(job_id, {"numer_bos": r["numer_bos"], "message": err})
 
                 if r["numer_bos"] >= last_bos:
                     last_bos = r["numer_bos"] + 1
@@ -401,7 +336,7 @@ async def run_pipeline(settings: Settings, job_id: str | None, from_bos: int | N
             elapsed = time.monotonic() - session_start
             throughput = session_processed / (elapsed / 3600) if elapsed > 0 else 0
 
-            # Update job in DB
+            # Update job via API
             job["current_numer_bos"] = last_bos
             job["processed_count"] = job.get("processed_count", 0) + processed
             job["embedded_count"] = job.get("embedded_count", 0) + embedded
@@ -410,7 +345,7 @@ async def run_pipeline(settings: Settings, job_id: str | None, from_bos: int | N
             new_status = "completed" if not remaining else ("paused" if rate_limited else "running")
             new_phase = "done" if not remaining else "generate"
 
-            await update_job(http, settings, job_id, {
+            await api.update_progress(job_id, {
                 "current_numer_bos": last_bos,
                 "processed_count": job["processed_count"],
                 "embedded_count": job["embedded_count"],
@@ -436,13 +371,13 @@ async def run_pipeline(settings: Settings, job_id: str | None, from_bos: int | N
                     await asyncio.sleep(1)
                 if _stop:
                     break
-                await update_job(http, settings, job_id, {"status": "running"})
+                await api.update_progress(job_id, {"status": "running"})
                 continue
 
             await asyncio.sleep(settings.batch_delay_ms / 1000)
 
         if _stop:
-            await update_job(http, settings, job_id, {"status": "paused"})
+            await api.update_progress(job_id, {"status": "paused"})
             console.print("[yellow]⏸ Job paused (graceful stop)[/]")
 
         # Summary

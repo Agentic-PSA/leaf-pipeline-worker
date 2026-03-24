@@ -2,9 +2,9 @@ from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
-    # Supabase
-    supabase_url: str
-    supabase_service_role_key: str
+    # Pipeline API (edge function)
+    pipeline_api_url: str  # e.g. https://evyugxcnwcvndtauoowg.supabase.co/functions/v1/leaf-pipeline
+    pipeline_api_key: str  # Supabase anon key (or service role key)
 
     # Legal DB
     legal_db_base: str = "http://host.docker.internal:3000"
