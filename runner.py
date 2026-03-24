@@ -22,7 +22,6 @@ from llm import (
     generate_embeddings,
     generate_leafs,
 )
-from matching import match_judgment_refs
 from pipeline_api import PipelineAPIClient
 
 console = Console()
@@ -65,6 +64,7 @@ class WorkerControl:
 
     def request_pause(self) -> None:
         self.pause_requested = True
+        self.stop_requested = False
 
     def request_resume(self) -> None:
         self.pause_requested = False
@@ -74,42 +74,40 @@ class WorkerControl:
         self.pause_requested = False
 
 
-# ── Prompts conversion ───────────────────────────────────────────
+def _sync_state(control: WorkerControl, **kwargs: Any) -> None:
+    control.state.update(kwargs)
 
 
 def prompts_from_api(data: dict) -> Prompts:
-    """Convert API prompts response to internal Prompts dataclass."""
-    p = Prompts()
-    for typ in ("case", "law", "solution"):
-        if typ in data:
-            setattr(p, f"{typ}_system", data[typ].get("system", getattr(p, f"{typ}_system")))
-            setattr(p, f"{typ}_user", data[typ].get("user", getattr(p, f"{typ}_user")))
-    if data.get("model"):
-        p.model = data["model"]
-    return p
+    return Prompts(
+        case_system=data.get("case", {}).get("system", ""),
+        case_user=data.get("case", {}).get("user", ""),
+        law_system=data.get("law", {}).get("system", ""),
+        law_user=data.get("law", {}).get("user", ""),
+        solution_system=data.get("solution", {}).get("system", ""),
+        solution_user=data.get("solution", {}).get("user", ""),
+        model=data.get("model", "gemini-2.5-flash-lite"),
+    )
 
 
-def _sync_state(control: WorkerControl, **updates: Any) -> None:
-    control.state.update({k: v for k, v in updates.items() if v is not None})
+# ── Pause helper ─────────────────────────────────────────────────
 
 
-async def _wait_if_paused(api: PipelineAPIClient, job_id: str, control: WorkerControl) -> None:
+async def _wait_if_paused(
+    api: PipelineAPIClient,
+    job_id: str,
+    control: WorkerControl,
+) -> None:
+    if not control.pause_requested:
+        return
+
     announced = False
-
-    while not control.stop_requested:
-        db_status = await api.read_job_status(job_id)
-        is_paused = control.pause_requested or db_status == "paused"
-
-        if not is_paused:
-            if announced:
-                await api.update_progress(job_id, {"status": "running"})
-                control.log("success", f"▶ Job resumed (status: {db_status or 'running'})")
-                _sync_state(control, status="running")
-            return
-
+    while control.pause_requested and not control.stop_requested:
         if not announced:
-            await api.update_progress(job_id, {"status": "paused"})
-            control.log("warning", "⏸ Job paused — waiting for resume signal…")
+            try:
+                await api.update_progress(job_id, {"status": "paused", "phase": "paused"})
+            except Exception:
+                pass
             _sync_state(control, status="paused")
             announced = True
 
@@ -125,7 +123,6 @@ async def process_one(
     judgment: dict,
     settings: Settings,
     prompts: Prompts,
-    alias_map: dict[str, int],
     api: PipelineAPIClient,
     worker_idx: int,
     control: WorkerControl,
@@ -228,8 +225,9 @@ async def process_one(
                         await db.mark_leaf_error(leaf["id"], "Embedding failed")
         embed_ms = int((time.monotonic() - embed_start) * 1000)
 
+        # Matching is delegated to edge function (has full alias map in Supabase)
         match_start = time.monotonic()
-        match_result = await match_judgment_refs(db, existing_ids, alias_map, api)
+        match_result = await api.match_batch(existing_ids)
         match_ms = int((time.monotonic() - match_start) * 1000)
 
         total_ms = int((time.monotonic() - start) * 1000)
@@ -237,7 +235,7 @@ async def process_one(
             "ok": True,
             "numer_bos": bos,
             "embedded": embedded,
-            "matched": match_result["matched"],
+            "matched": match_result.get("matched", 0),
             "gen_ms": gen_ms,
             "embed_ms": embed_ms,
             "match_ms": match_ms,
@@ -248,18 +246,13 @@ async def process_one(
     except RateLimitError:
         return {"ok": False, "numer_bos": bos, "embedded": 0, "matched": 0, "error": "RATE_LIMIT"}
     except CreditsExhaustedError:
-        return {
-            "ok": False,
-            "numer_bos": bos,
-            "embedded": 0,
-            "matched": 0,
-            "error": "CREDITS_EXHAUSTED",
-        }
+        return {"ok": False, "numer_bos": bos, "embedded": 0, "matched": 0, "error": "CREDITS_EXHAUSTED"}
     except Exception as exc:
-        return {"ok": False, "numer_bos": bos, "embedded": 0, "matched": 0, "error": str(exc)[:300]}
+        control.log("error", f"worker[{worker_idx}] BOS={bos} error: {exc}")
+        return {"ok": False, "numer_bos": bos, "embedded": 0, "matched": 0, "error": str(exc)[:200]}
 
 
-# ── Main loop ────────────────────────────────────────────────────
+# ── Main pipeline loop ───────────────────────────────────────────
 
 
 async def run_pipeline(
@@ -267,13 +260,11 @@ async def run_pipeline(
     job_id: str | None,
     from_bos: int | None,
     to_bos: int | None,
-    force: bool,
+    force: bool = False,
     control: WorkerControl | None = None,
-    workers_override: int | None = None,
 ) -> dict[str, Any]:
-    control = control or WorkerControl()
-    if workers_override is not None:
-        settings = settings.model_copy(update={"workers": workers_override})
+    if control is None:
+        control = WorkerControl()
 
     job: dict[str, Any] | None = None
 
@@ -285,9 +276,6 @@ async def run_pipeline(
             prompts_data = await api.get_prompts()
             prompts = prompts_from_api(prompts_data)
             control.log("success", f"✓ Loaded prompts via API, model: {prompts.model}")
-
-            alias_map = await api.get_aliases()
-            control.log("success", f"✓ Loaded {len(alias_map)} aliases via API")
 
             if job_id:
                 job = await api.get_job(job_id)
@@ -387,7 +375,7 @@ async def run_pipeline(
 
                 async def _run(judgment: dict, idx: int) -> dict[str, Any]:
                     await asyncio.sleep(idx * settings.stagger_ms / 1000)
-                    return await process_one(db, http, judgment, settings, prompts, alias_map, api, idx, control)
+                    return await process_one(db, http, judgment, settings, prompts, api, idx, control)
 
                 tasks = [_run(judgment, idx) for idx, judgment in enumerate(batch)]
                 results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -424,8 +412,8 @@ async def run_pipeline(
                             rate_limited = True
                         else:
                             session_errors += 1
-                        control.log("error", f"✗ BOS={result['numer_bos']}: {err}")
-                        await api.append_error(job_id, {"numer_bos": result["numer_bos"], "message": err})
+                            control.log("error", f"✗ BOS={result['numer_bos']}: {err}")
+                            await api.append_error(job_id, {"numer_bos": result["numer_bos"], "message": err})
 
                     if result["numer_bos"] >= last_bos:
                         last_bos = result["numer_bos"] + 1
@@ -513,11 +501,11 @@ async def run_pipeline(
 
             control.log("info", "Summary:")
             control.log("info", f"  Processed: {session_processed}")
-            control.log("info", f"  Embedded:  {session_embedded}")
-            control.log("info", f"  Errors:    {session_errors}")
-            control.log("info", f"  Time:      {elapsed:.0f}s ({elapsed / 60:.1f}min)")
+            control.log("info", f"  Embedded: {session_embedded}")
+            control.log("info", f"  Errors: {session_errors}")
+            control.log("info", f"  Time: {elapsed:.0f}s ({elapsed / 60:.1f}min)")
             if session_processed > 0:
-                control.log("info", f"  Avg:       {elapsed / session_processed * 1000:.0f}ms/judgment")
+                control.log("info", f"  Avg: {elapsed / session_processed * 1000:.0f}ms/judgment")
                 control.log("info", f"  Throughput:{session_processed / (elapsed / 3600):.0f}/h")
 
             return summary

@@ -25,7 +25,7 @@ class PipelineAPIClient:
                 "apikey": self.api_key,
             },
             json=payload,
-            timeout=30,
+            timeout=60,
         )
         r.raise_for_status()
         return r.json()
@@ -60,19 +60,18 @@ class PipelineAPIClient:
     async def append_error(self, job_id: str, error: dict) -> None:
         await self._call("worker_append_error", job_id=job_id, error=error)
 
-    # ── Prompts & aliases ────────────────────────────────────
+    # ── Prompts ──────────────────────────────────────────────
 
     async def get_prompts(self) -> dict:
         """Returns {prompts: {case: {system, user}, law: ..., solution: ..., model}}."""
         data = await self._call("worker_get_prompts")
         return data.get("prompts", {})
 
-    async def get_aliases(self) -> dict[str, int]:
-        data = await self._call("worker_get_aliases")
-        return data.get("aliases", {})
+    # ── Matching (delegated to edge function) ────────────────
 
-    async def save_alias(self, alias: str, act_id: int, act_title: str | None = None) -> None:
-        try:
-            await self._call("worker_save_alias", alias=alias, act_id=act_id, act_title=act_title)
-        except Exception:
-            pass  # duplicate — ignore
+    async def match_batch(self, leaf_ids: list[int]) -> dict[str, int]:
+        """Delegate matching to edge function which has full alias map in Supabase."""
+        if not leaf_ids:
+            return {"matched": 0, "partial": 0, "unmatched": 0, "total": 0}
+        data = await self._call("worker_match_batch", leaf_ids=leaf_ids)
+        return data
