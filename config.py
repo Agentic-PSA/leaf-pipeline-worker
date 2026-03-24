@@ -26,7 +26,7 @@ class Settings(BaseSettings):
     embedding_dim: int = 1536
 
     # Pipeline
-    workers: int = 10
+    workers: int = 20
     batch_delay_ms: int = 500
     stagger_ms: int = 150
 
