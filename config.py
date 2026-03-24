@@ -1,10 +1,17 @@
-from pydantic_settings import BaseSettings
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
     # Pipeline API (edge function)
-    pipeline_api_url: str  # e.g. https://evyugxcnwcvndtauoowg.supabase.co/functions/v1/leaf-pipeline
-    pipeline_api_key: str  # Supabase anon key (or service role key)
+    pipeline_api_url: str  # e.g. https://.../functions/v1/leaf-pipeline
+    pipeline_api_key: str  # anon key or dedicated API key
 
     # Legal DB
     legal_db_base: str = "http://host.docker.internal:3000"
@@ -24,6 +31,6 @@ class Settings(BaseSettings):
     batch_delay_ms: int = 500
     stagger_ms: int = 150
 
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
+    # Worker API
+    worker_api_token: str | None = None
+    worker_api_log_limit: int = Field(default=500, ge=50, le=5000)

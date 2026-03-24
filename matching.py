@@ -109,7 +109,8 @@ def parse_article_reference(text: str) -> dict[str, str] | None:
 
         m = re.match(r"^ust\.?\s*(\d+[a-z]?(?:\s*[-–—]\s*\d+[a-z]?)?)(.*)$", rest, re.I)
         if m:
-            val = f"ust. {re.sub(r'\\s*[-–—]\\s*', '-', m.group(1).strip())}"
+            cleaned_ust = re.sub(r"\s*[-–—]\s*", "-", m.group(1).strip())
+            val = f"ust. {cleaned_ust}"
             rest = (m.group(2) or "").strip()
             i_conn = re.match(r"^i\s+(\d+[a-z]?(?:\s*[-–—]\s*\d+[a-z]?)?)\s*(.*)$", rest, re.I)
             if i_conn:
@@ -125,13 +126,15 @@ def parse_article_reference(text: str) -> dict[str, str] | None:
             rest, re.I,
         )
         if m:
-            number_parts.append(f"pkt {re.sub(r'\\s+', ' ', m.group(1).strip())}")
+            cleaned_pkt = re.sub(r"\s+", " ", m.group(1).strip())
+            number_parts.append(f"pkt {cleaned_pkt}")
             rest = (m.group(2) or "").strip()
             continue
 
         m = re.match(r"^lit\.?\s*([a-z](?:\s+i\s+[a-z])*)(.*)$", rest, re.I)
         if m:
-            number_parts.append(f"lit. {re.sub(r'\\s+', ' ', m.group(1).strip())}")
+            cleaned_lit = re.sub(r"\s+", " ", m.group(1).strip())
+            number_parts.append(f"lit. {cleaned_lit}")
             rest = (m.group(2) or "").strip()
             continue
 
