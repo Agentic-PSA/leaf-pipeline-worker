@@ -1,0 +1,10 @@
+version: "3.8"
+
+services:
+  leaf-pipeline:
+    build: .
+    env_file: .env
+    restart: "no"
+    # Override CMD in docker-compose run:
+    #   docker-compose run leaf-pipeline --job-id <UUID>
+    #   docker-compose run leaf-pipeline --from 100000 --to 105000 --workers 10
