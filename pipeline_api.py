@@ -25,7 +25,7 @@ class PipelineAPIClient:
                 "apikey": self.api_key,
             },
             json=payload,
-            timeout=60,
+            timeout=30,
         )
         r.raise_for_status()
         return r.json()
@@ -66,12 +66,3 @@ class PipelineAPIClient:
         """Returns {prompts: {case: {system, user}, law: ..., solution: ..., model}}."""
         data = await self._call("worker_get_prompts")
         return data.get("prompts", {})
-
-    # ── Matching (delegated to edge function) ────────────────
-
-    async def match_batch(self, leaf_ids: list[int]) -> dict[str, int]:
-        """Delegate matching to edge function which has full alias map in Supabase."""
-        if not leaf_ids:
-            return {"matched": 0, "partial": 0, "unmatched": 0, "total": 0}
-        data = await self._call("worker_match_batch", leaf_ids=leaf_ids)
-        return data

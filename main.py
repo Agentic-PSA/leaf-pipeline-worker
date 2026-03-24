@@ -56,11 +56,8 @@ def main() -> None:
         uvicorn.run("worker_api:app", host=args.host, port=args.port, reload=False)
         return
 
-    if args.workers:
-        settings.workers = args.workers
-
     console.print(
-        f"[bold cyan]LEAF Pipeline Worker[/] — {settings.workers} workers, model: {settings.llm_model}"
+        f"[bold cyan]LEAF Pipeline Worker[/] — {args.workers or settings.workers} workers, model: {settings.llm_model}"
     )
 
     asyncio.run(
@@ -71,6 +68,7 @@ def main() -> None:
             args.to_bos,
             args.force,
             control=control,
+            workers_override=args.workers,
         )
     )
 

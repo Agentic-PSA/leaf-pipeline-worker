@@ -143,7 +143,7 @@ async def process_one(
             gen_start = time.monotonic()
             content = await db.get_judgment_content(judgment["id"])
             if not content or len(content.strip()) < 50:
-                return {"ok": True, "numer_bos": bos, "embedded": 0, "matched": 0, "skipped": True}
+                return {"ok": True, "numer_bos": bos, "embedded": 0, "skipped": True}
 
             leafs = await generate_leafs(http, content, settings.gemini_api_key, prompts)
 
@@ -225,31 +225,26 @@ async def process_one(
                         await db.mark_leaf_error(leaf["id"], "Embedding failed")
         embed_ms = int((time.monotonic() - embed_start) * 1000)
 
-        # Matching is delegated to edge function (has full alias map in Supabase)
-        match_start = time.monotonic()
-        match_result = await api.match_batch(existing_ids)
-        match_ms = int((time.monotonic() - match_start) * 1000)
+        # NOTE: Matching is NOT done here — it runs as a separate process after all leafs are generated.
 
         total_ms = int((time.monotonic() - start) * 1000)
         return {
             "ok": True,
             "numer_bos": bos,
             "embedded": embedded,
-            "matched": match_result.get("matched", 0),
             "gen_ms": gen_ms,
             "embed_ms": embed_ms,
-            "match_ms": match_ms,
             "total_ms": total_ms,
             "leafs": len(existing),
         }
 
     except RateLimitError:
-        return {"ok": False, "numer_bos": bos, "embedded": 0, "matched": 0, "error": "RATE_LIMIT"}
+        return {"ok": False, "numer_bos": bos, "embedded": 0, "error": "RATE_LIMIT"}
     except CreditsExhaustedError:
-        return {"ok": False, "numer_bos": bos, "embedded": 0, "matched": 0, "error": "CREDITS_EXHAUSTED"}
+        return {"ok": False, "numer_bos": bos, "embedded": 0, "error": "CREDITS_EXHAUSTED"}
     except Exception as exc:
         control.log("error", f"worker[{worker_idx}] BOS={bos} error: {exc}")
-        return {"ok": False, "numer_bos": bos, "embedded": 0, "matched": 0, "error": str(exc)[:200]}
+        return {"ok": False, "numer_bos": bos, "embedded": 0, "error": str(exc)[:200]}
 
 
 # ── Main pipeline loop ───────────────────────────────────────────
@@ -262,9 +257,11 @@ async def run_pipeline(
     to_bos: int | None,
     force: bool = False,
     control: WorkerControl | None = None,
+    workers_override: int | None = None,
 ) -> dict[str, Any]:
-    if control is None:
-        control = WorkerControl()
+    control = control or WorkerControl()
+    if workers_override is not None:
+        settings = settings.model_copy(update={"workers": workers_override})
 
     job: dict[str, Any] | None = None
 
@@ -383,7 +380,6 @@ async def run_pipeline(
                 batch_ms = int((time.monotonic() - batch_start) * 1000)
                 processed = 0
                 embedded = 0
-                matched = 0
                 last_bos = current_bos
                 rate_limited = False
 
@@ -396,14 +392,13 @@ async def run_pipeline(
                     if result["ok"]:
                         processed += 1
                         embedded += result.get("embedded", 0)
-                        matched += result.get("matched", 0)
                         bos = result["numer_bos"]
                         if not result.get("skipped"):
                             control.log(
                                 "success",
                                 (
                                     f"✓ BOS={bos} | {result.get('gen_ms', 0)}ms gen / "
-                                    f"{result.get('embed_ms', 0)}ms emb / {result.get('match_ms', 0)}ms match"
+                                    f"{result.get('embed_ms', 0)}ms emb"
                                 ),
                             )
                     else:
@@ -458,7 +453,7 @@ async def run_pipeline(
                 control.log(
                     "info",
                     (
-                        f"Batch: {processed}/{len(batch)} ok, {embedded} embedded, {matched} matched "
+                        f"Batch: {processed}/{len(batch)} ok, {embedded} embedded "
                         f"| {batch_ms}ms | Session: {session_processed} ({throughput:.0f}/h) | Errors: {session_errors}"
                     ),
                 )
