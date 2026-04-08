@@ -110,6 +110,7 @@ class GeneratedLeafs:
     case: list[str] = field(default_factory=list)
     law: list[LawLeaf] = field(default_factory=list)
     solution: list[str] = field(default_factory=list)
+    errors: dict[str, str] = field(default_factory=dict)  # typ -> error message
 
 
 # ── LLM call with retry ──────────────────────────────────────────
@@ -180,29 +181,36 @@ async def generate_leafs(
 ) -> GeneratedLeafs:
     import asyncio
 
-    case_r = await call_llm(client, text, "case", api_key, prompts)
-    await asyncio.sleep(0.15)
-    law_r = await call_llm(client, text, "law", api_key, prompts)
-    await asyncio.sleep(0.15)
-    sol_r = await call_llm(client, text, "solution", api_key, prompts)
+    result = GeneratedLeafs()
 
-    return GeneratedLeafs(
-        case=case_r.get("leafs", []),
-        law=[
-            LawLeaf(
-                tresc=l.get("tresc", ""),
-                przepisy=[
-                    {
-                        "oznaczenie": p.get("oznaczenie", ""),
-                        "scoring": min(10, max(0, int(p.get("scoring", 0)))),
-                    }
-                    for p in l.get("przepisy", [])
-                ],
-            )
-            for l in law_r.get("leafs", [])
-        ],
-        solution=sol_r.get("leafs", []),
-    )
+    # Process each type independently — failures don't block others
+    for typ in ("case", "law", "solution"):
+        try:
+            r = await call_llm(client, text, typ, api_key, prompts)
+            if typ == "law":
+                result.law = [
+                    LawLeaf(
+                        tresc=l.get("tresc", ""),
+                        przepisy=[
+                            {
+                                "oznaczenie": p.get("oznaczenie", ""),
+                                "scoring": min(10, max(0, int(p.get("scoring", 0)))),
+                            }
+                            for p in l.get("przepisy", [])
+                        ],
+                    )
+                    for l in r.get("leafs", [])
+                ]
+            else:
+                setattr(result, typ, r.get("leafs", []))
+        except (RateLimitError, CreditsExhaustedError):
+            raise  # These should propagate immediately
+        except Exception as exc:
+            result.errors[typ] = str(exc)[:300]
+
+        await asyncio.sleep(0.15)
+
+    return result
 
 
 # ── Embeddings ────────────────────────────────────────────────────

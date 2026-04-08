@@ -60,6 +60,12 @@ class PipelineAPIClient:
     async def append_error(self, job_id: str, error: dict) -> None:
         await self._call("worker_append_error", job_id=job_id, error=error)
 
+    async def log_extraction_errors(self, errors: list[dict]) -> None:
+        """Log per-type extraction errors for later retry."""
+        if not errors:
+            return
+        await self._call("worker_log_extraction_error", errors=errors)
+
     # ── Prompts ──────────────────────────────────────────────
 
     async def get_prompts(self) -> dict:

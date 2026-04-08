@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+import traceback
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -23,6 +24,51 @@ from llm import (
     generate_leafs,
 )
 from pipeline_api import PipelineAPIClient
+import re
+
+
+def map_court_type_id(rodzaj_organu: str | None) -> int | None:
+    """Map rodzaj_organu string to court_type_id (1-7).
+
+    Uses fuzzy / contains matching to handle trailing spaces, typos
+    (e.g. 'Konsytytucyjny'), and extra suffixes in the source data.
+    """
+    if not rodzaj_organu:
+        return None
+    # Normalize: collapse whitespace, strip, lowercase
+    r = " ".join(rodzaj_organu.split()).lower()
+    if not r:
+        return None
+    # 1 – Sąd Najwyższy
+    if r.startswith("sąd najwyższy") or r.startswith("sad najwyzszy"):
+        return 1
+    # 2 – Naczelny Sąd Administracyjny
+    if "naczelny" in r and "administracyjny" in r:
+        return 2
+    # 3 – Sąd powszechny (Rejonowy, Okręgowy, Apelacyjny)
+    if re.match(r"^s[aą]d (rejonowy|okr[eę]gowy|apelacyjny|powszechny)", r):
+        return 3
+    # 4 – Wojewódzki Sąd Administracyjny
+    if ("wojew" in r) and ("administracyjny" in r):
+        return 4
+    if r.startswith("wsa"):
+        return 4
+    # 5 – Trybunał Konstytucyjny (handles typos like konsytytucyjny)
+    if ("trybuna" in r) and ("konstytu" in r):
+        return 5
+    if r.strip() in ("tk",):
+        return 5
+    # 6 – Krajowa Izba Odwoławcza
+    if ("krajowa" in r) and ("odwo" in r):
+        return 6
+    if r.startswith("kio"):
+        return 6
+    # 7 – Trybunał Sprawiedliwości
+    if ("trybuna" in r) and ("sprawiedliwo" in r):
+        return 7
+    if "tsue" in r:
+        return 7
+    return None
 
 console = Console()
 
@@ -128,6 +174,7 @@ async def process_one(
     control: WorkerControl,
 ) -> dict[str, Any]:
     bos = int(judgment["numer_bos"])
+    court_type_id = map_court_type_id(judgment.get("rodzaj_organu"))
     start = time.monotonic()
 
     try:
@@ -147,6 +194,25 @@ async def process_one(
 
             leafs = await generate_leafs(http, content, settings.gemini_api_key, prompts)
 
+            # Log per-type extraction errors for retry
+            if leafs.errors:
+                extraction_errors = [
+                    {
+                        "job_id": control.state.get("job_id"),
+                        "numer_bos": bos,
+                        "orzeczenie_id": judgment["id"],
+                        "typ": typ,
+                        "error_message": msg,
+                    }
+                    for typ, msg in leafs.errors.items()
+                ]
+                try:
+                    await api.log_extraction_errors(extraction_errors)
+                except Exception as log_exc:
+                    control.log("warning", f"worker[{worker_idx}] BOS={bos} failed to log extraction errors: {log_exc}")
+                for typ, msg in leafs.errors.items():
+                    control.log("warning", f"worker[{worker_idx}] BOS={bos} type={typ} error (logged for retry): {msg[:100]}")
+
             for typ in ("case", "solution"):
                 valid = [text.strip() for text in getattr(leafs, typ) if len(text.strip()) > 10]
                 if valid and typ not in existing_types:
@@ -158,6 +224,7 @@ async def process_one(
                                 "tresc": leaf_text,
                                 "status": "generated",
                                 "llm_model": prompts.model,
+                                "court_type_id": court_type_id,
                             }
                         )
 
@@ -171,6 +238,7 @@ async def process_one(
                             "tresc": law.tresc.strip(),
                             "status": "generated",
                             "llm_model": prompts.model,
+                            "court_type_id": court_type_id,
                         }
                     )
                     all_law_p.extend(law.przepisy)
@@ -506,8 +574,9 @@ async def run_pipeline(
             return summary
 
     except Exception as exc:
-        control.log("error", f"Fatal worker error: {exc}")
-        _sync_state(control, status="failed", fatal_error=str(exc))
+        tb = traceback.format_exc()
+        control.log("error", f"Fatal worker error: {exc}\n{tb}")
+        _sync_state(control, status="failed", fatal_error=f"{exc}\n{tb}")
         if job_id:
             try:
                 async with httpx.AsyncClient(timeout=30, http2=True) as http:
