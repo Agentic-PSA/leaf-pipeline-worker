@@ -1,4 +1,4 @@
-"""LLM calls (Google Gemini API direct) and OpenAI embeddings."""
+"""LLM calls (OpenAI API) and OpenAI embeddings."""
 
 from __future__ import annotations
 
@@ -14,8 +14,7 @@ from tenacity import (
     wait_exponential,
 )
 
-# Direct Google Gemini API (OpenAI-compatible endpoint)
-GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+OPENAI_CHAT_URL = "https://api.openai.com/v1/chat/completions"
 OPENAI_EMBED_URL = "https://api.openai.com/v1/embeddings"
 
 
@@ -96,7 +95,7 @@ class Prompts:
     law_user: str = "Wyodrębnij podstawy prawne:\n\n{{TEXT}}"
     solution_system: str = "Wyodrębnij rozstrzygnięcie z orzeczenia."
     solution_user: str = "Wyodrębnij rozstrzygnięcie:\n\n{{TEXT}}"
-    model: str = "gemini-2.5-flash-lite"
+    model: str = "gpt-4o-mini"
 
 
 @dataclass
@@ -142,7 +141,7 @@ async def call_llm(
         user_content = usr_template + "\n\n" + text[:15000]
 
     resp = await client.post(
-        GEMINI_URL,
+        OPENAI_CHAT_URL,
         headers={
             "Content-Type": "application/json",
             "Authorization": f"Bearer {api_key}",

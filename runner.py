@@ -132,7 +132,7 @@ def prompts_from_api(data: dict) -> Prompts:
         law_user=data.get("law", {}).get("user", ""),
         solution_system=data.get("solution", {}).get("system", ""),
         solution_user=data.get("solution", {}).get("user", ""),
-        model=data.get("model", "gemini-2.5-flash-lite"),
+        model=data.get("model", "gpt-4o-mini"),
     )
 
 
@@ -192,7 +192,7 @@ async def process_one(
             if not content or len(content.strip()) < 50:
                 return {"ok": True, "numer_bos": bos, "embedded": 0, "skipped": True}
 
-            leafs = await generate_leafs(http, content, settings.gemini_api_key, prompts)
+            leafs = await generate_leafs(http, content, settings.openai_api_key, prompts)
 
             # Log per-type extraction errors for retry
             if leafs.errors:
