@@ -25,7 +25,7 @@ class PipelineAPIClient:
                 "apikey": self.api_key,
             },
             json=payload,
-            timeout=30,
+            timeout=180,
         )
         r.raise_for_status()
         return r.json()
