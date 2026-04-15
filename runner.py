@@ -124,7 +124,7 @@ def _sync_state(control: WorkerControl, **kwargs: Any) -> None:
     control.state.update(kwargs)
 
 
-def prompts_from_api(data: dict) -> Prompts:
+def prompts_from_api(data: dict, model_override: str = "gpt-4o-mini") -> Prompts:
     return Prompts(
         case_system=data.get("case", {}).get("system", ""),
         case_user=data.get("case", {}).get("user", ""),
@@ -132,7 +132,7 @@ def prompts_from_api(data: dict) -> Prompts:
         law_user=data.get("law", {}).get("user", ""),
         solution_system=data.get("solution", {}).get("system", ""),
         solution_user=data.get("solution", {}).get("user", ""),
-        model=data.get("model", "gpt-4o-mini"),
+        model=model_override,
     )
 
 
@@ -185,6 +185,7 @@ async def process_one(
         rows: list[dict] = []
         all_law_p: list[dict] = []
         gen_ms = 0
+        gen_errors: dict[str, str] = {}
 
         if not {"case", "law", "solution"}.issubset(existing_types):
             gen_start = time.monotonic()
@@ -193,6 +194,7 @@ async def process_one(
                 return {"ok": True, "numer_bos": bos, "embedded": 0, "skipped": True}
 
             leafs = await generate_leafs(http, content, settings.openai_api_key, prompts)
+            gen_errors = leafs.errors
 
             # Log per-type extraction errors for retry
             if leafs.errors:
@@ -269,6 +271,17 @@ async def process_one(
 
             gen_ms = int((time.monotonic() - gen_start) * 1000)
 
+            # All LLM calls failed — no leafs generated
+            if not rows and gen_errors:
+                failed_types = ", ".join(gen_errors.keys())
+                return {
+                    "ok": False,
+                    "numer_bos": bos,
+                    "embedded": 0,
+                    "gen_ms": gen_ms,
+                    "error": f"All extractions failed ({failed_types}): {list(gen_errors.values())[0][:150]}",
+                }
+
         embed_start = time.monotonic()
         embedded = 0
         if existing_ids:
@@ -339,8 +352,8 @@ async def run_pipeline(
             api = PipelineAPIClient(settings.pipeline_api_url, settings.pipeline_api_key, http)
 
             prompts_data = await api.get_prompts()
-            prompts = prompts_from_api(prompts_data)
-            control.log("success", f"✓ Loaded prompts via API, model: {prompts.model}")
+            prompts = prompts_from_api(prompts_data, model_override=settings.llm_model)
+            control.log("success", f"✓ Loaded prompts via API, model: {prompts.model} (from env LLM_MODEL)")
 
             if job_id:
                 job = await api.get_job(job_id)
