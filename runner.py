@@ -124,7 +124,7 @@ def _sync_state(control: WorkerControl, **kwargs: Any) -> None:
     control.state.update(kwargs)
 
 
-def prompts_from_api(data: dict, model_override: str = "gpt-4o-mini") -> Prompts:
+def prompts_from_api(data: dict, model_override: str = "gemini-2.5-flash-lite") -> Prompts:
     return Prompts(
         case_system=data.get("case", {}).get("system", ""),
         case_user=data.get("case", {}).get("user", ""),
@@ -193,7 +193,7 @@ async def process_one(
             if not content or len(content.strip()) < 50:
                 return {"ok": True, "numer_bos": bos, "embedded": 0, "skipped": True}
 
-            leafs = await generate_leafs(http, content, settings.openai_api_key, prompts)
+            leafs = await generate_leafs(http, content, settings.gemini_api_key, prompts)
             gen_errors = leafs.errors
 
             # Log per-type extraction errors for retry

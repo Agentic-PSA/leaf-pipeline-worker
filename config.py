@@ -16,9 +16,12 @@ class Settings(BaseSettings):
     # Legal DB
     legal_db_base: str = "http://host.docker.internal:3000"
 
-    # LLM & Embeddings (OpenAI)
+    # LLM (Google Gemini API - direct)
+    gemini_api_key: str
+    llm_model: str = "gemini-2.5-flash-lite"
+
+    # Embeddings (OpenAI)
     openai_api_key: str
-    llm_model: str = "gpt-4o-mini"
     embedding_model: str = "text-embedding-3-small"
     embedding_dim: int = 1536
 
