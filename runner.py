@@ -27,6 +27,14 @@ from pipeline_api import PipelineAPIClient
 import re
 
 
+def extract_year(data_orzeczenia: Any) -> int | None:
+    """Year from data_orzeczenia (ISO 'YYYY-MM-DD', 'DD.MM.YYYY' or any text with a 4-digit year)."""
+    if data_orzeczenia is None:
+        return None
+    m = re.search(r"(?<!\d)(19\d{2}|20\d{2})(?!\d)", str(data_orzeczenia))
+    return int(m.group(1)) if m else None
+
+
 def map_court_type_id(rodzaj_organu: str | None) -> int | None:
     """Map rodzaj_organu string to court_type_id (1-7).
 
@@ -175,6 +183,9 @@ async def process_one(
 ) -> dict[str, Any]:
     bos = int(judgment["numer_bos"])
     court_type_id = map_court_type_id(judgment.get("rodzaj_organu"))
+    rok = extract_year(judgment.get("data_orzeczenia"))
+    if rok is None:
+        control.log("warning", f"worker[{worker_idx}] BOS={bos} brak roku (data_orzeczenia={judgment.get('data_orzeczenia')!r})")
     start = time.monotonic()
 
     try:
@@ -227,6 +238,7 @@ async def process_one(
                                 "status": "generated",
                                 "llm_model": prompts.model,
                                 "court_type_id": court_type_id,
+                                "rok": rok,
                             }
                         )
 

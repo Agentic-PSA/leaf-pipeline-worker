@@ -103,7 +103,7 @@ class LegalDBClient:
             bos_vals = ",".join(str(b) for b in range(chunk_from, chunk_to + 1))
 
             all_in_chunk = await self.get(
-                f"/orzeczenia?numer_bos=in.({bos_vals})&select=id,numer_bos,sygnatura,rodzaj_organu"
+                f"/orzeczenia?numer_bos=in.({bos_vals})&select=id,numer_bos,sygnatura,rodzaj_organu,data_orzeczenia"
             )
             if not all_in_chunk:
                 continue
